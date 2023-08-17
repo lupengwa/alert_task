@@ -33,4 +33,4 @@ Please consider the performance of the function you write - how would it work wi
 ### Alerts
 The last part is related to real-time alerts for unusual events. Our users would like to be notified if a person is detected for a continued period of time. Imagine that the ingestion function is called real-time as the detections happen every 30 seconds.
 
-Please add additional logic which will print to the console if a person is detected in 5 consecutive intervals.
+Please add additional logic which will print to the console if a person is detected in 5 consecutive intervals. Please consider performance - the write function will be called very often.
