@@ -37,7 +37,7 @@ class Type(Enum):
     VAN = 'van'
 
 
-ped_detected_start_time = None
+pedestrian_detected_start_time = None
 bicycle_detected_start_time = None
 threshold = timedelta(minutes=5)
 timestamp_format = "%Y-%m-%dT%H:%M:%S"
@@ -45,12 +45,12 @@ timestamp_format = "%Y-%m-%dT%H:%M:%S"
 
 def alert_unusual_activity(timestamp: str, detection_str: str):
     global bicycle_detected_start_time
-    global ped_detected_start_time
+    global pedestrian_detected_start_time
     event_time = datetime.strptime(timestamp, timestamp_format)
     try:
         detection_type = Type(detection_str)
         if detection_type == Type.BICYCLE:
-            ped_detected_start_time = None
+            pedestrian_detected_start_time = None
             if not bicycle_detected_start_time:
                 bicycle_detected_start_time = event_time
             elif event_time - bicycle_detected_start_time >= threshold:
@@ -58,13 +58,13 @@ def alert_unusual_activity(timestamp: str, detection_str: str):
                     f"Alert: a person has been detected for more than 5 mins between {bicycle_detected_start_time}-{event_time}")
         elif detection_type == Type.PEDESTRIAN:
             bicycle_detected_start_time = None
-            if not ped_detected_start_time:
-                ped_detected_start_time = event_time
-            elif event_time - ped_detected_start_time >= threshold:
+            if not pedestrian_detected_start_time:
+                pedestrian_detected_start_time = event_time
+            elif event_time - pedestrian_detected_start_time >= threshold:
                 print(
-                    f"Alert: a person has been detected for more than 5 mins between {ped_detected_start_time}-{event_time}")
+                    f"Alert: a person has been detected for more than 5 mins between {pedestrian_detected_start_time}-{event_time}")
         else:
-            ped_detected_start_time = None
+            pedestrian_detected_start_time = None
             bicycle_detected_start_time = None
     except ValueError:
         print(f"Invalid detection type:{detection_str}")
@@ -84,13 +84,6 @@ def ingest_data(conn: sa.Connection, timestamp: str, detection_type: str) -> boo
         return False
 
 
-def check_data(conn: sa.Connection):
-    select_query = sa.text("SELECT * FROM detections")
-    result = conn.execute(select_query)
-    for row in result:
-        print(row)
-
-
 # given a category name, generate aggregate intervals for this category
 def generate_type_aggregate(result: CursorResult[Any], aggregate_result: dict[str, list[tuple[str, str]]],
                             detection_type: str):
@@ -99,27 +92,101 @@ def generate_type_aggregate(result: CursorResult[Any], aggregate_result: dict[st
     for row in result:
         if not current_interval[0]:
             current_interval[0] = row[0]
-        elif row[0] <= current_interval[0] + timedelta(minutes=1):
-            current_interval[1] = row[0]
         else:
+            next_interval_start = None
+            if row[0] <= current_interval[0] + timedelta(minutes=1):
+                current_interval[1] = row[0]
+            else:
+                current_interval[1] = current_interval[0]
+                next_interval_start = row[0]
             aggregate_result[detection_type].append((current_interval[0], current_interval[1]))
-            current_interval[0] = row[0]
-            current_interval[1] = None
+            current_interval[0] = next_interval_start
     # post operation
-    if not current_interval[1]:
+    if current_interval[0] and not current_interval[1]:
         current_interval[1] = current_interval[0]
-    aggregate_result[detection_type].append((current_interval[0], current_interval[1]))
+        aggregate_result[detection_type].append((current_interval[0], current_interval[1]))
+
+
+people_sql = """
+WITH people_data AS (
+SELECT
+time
+FROM
+detections
+WHERE
+TYPE IN (:pedestrian, :bicycle)
+)
+SELECT
+min(time) AS time
+FROM
+people_data
+UNION
+SELECT
+COALESCE(nxt_result.nxt_time,
+cur.time) AS time
+FROM
+people_data AS cur
+LEFT JOIN LATERAL (
+SELECT
+nxt.time AS nxt_time
+FROM
+people_data AS nxt
+WHERE
+nxt.time >= cur.time + INTERVAL '1 minute'
+ORDER BY
+nxt.time
+LIMIT 1
+) nxt_result ON
+TRUE
+ORDER BY
+time
+"""
+
+vehicle_sql = """
+WITH vehicle_data AS (
+SELECT
+time
+FROM
+detections
+WHERE
+TYPE IN (:car, :truck,:van)
+)
+SELECT
+min(time) AS time
+FROM
+vehicle_data
+UNION
+SELECT
+COALESCE(nxt_result.nxt_time,
+cur.time) AS time
+FROM
+vehicle_data AS cur
+LEFT JOIN LATERAL (
+SELECT
+nxt.time AS nxt_time
+FROM
+vehicle_data AS nxt
+WHERE
+nxt.time >= cur.time + INTERVAL '1 minute'
+ORDER BY
+nxt.time
+LIMIT 1
+) nxt_result ON
+TRUE
+ORDER BY
+time
+"""
 
 
 def aggregate_detections(conn: sa.Connection) -> dict[str, list[tuple[str, str]]]:
     aggregate_result = {}
 
-    select_people_query = sa.text("SELECT time FROM detections WHERE type = :pedestrian OR type= :bicycle ORDER BY time ASC")
+    select_people_query = sa.text(people_sql)
     people_result = conn.execute(select_people_query,
                                  {"pedestrian": Type.PEDESTRIAN.value, "bicycle": Type.BICYCLE.value})
     generate_type_aggregate(people_result, aggregate_result, "people")
 
-    select_vehicle_query = sa.text("SELECT time FROM detections WHERE type IN (:car, :truck, :van) ORDER BY time ASC")
+    select_vehicle_query = sa.text(vehicle_sql)
     vehicle_result = conn.execute(select_vehicle_query,
                                   {"car": Type.CAR.value, "truck": Type.TRUCK.value, "van": Type.VAN.value})
     generate_type_aggregate(vehicle_result, aggregate_result, "vehicles")
